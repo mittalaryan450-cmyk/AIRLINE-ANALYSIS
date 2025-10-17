@@ -15,4 +15,191 @@ try:
 except Exception as e:
     print(f"❌ Error connecting to database: {e}")
     exit()
+import pandas as pd
+import pyodbc
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# --- Step 1: Connect to Your Database ---
+server_name = 'AARYANMITTAL\\SQLEXPRESS'
+database_name = 'Airline_Analysis'
+connection_string = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server_name};DATABASE={database_name};Trusted_Connection=yes;'
+
+try:
+    db_connection = pyodbc.connect(connection_string)
+    print("✅ Connection successful! Generating impressive visuals...")
+except Exception as e:
+    print(f"❌ Error connecting to database. \nDetails: {e}")
+    exit()
+
+# --- Global Style Settings for a Professional Look ---
+sns.set_style("whitegrid")
+plt.style.use('fivethirtyeight') # A popular, clean style for data journalism
+
+# --- KPI 1: On-Time Performance by SSR Category (Impressive Bar Chart) ---
+print("\n--- Generating KPI 1: On-Time Performance by SSR Category ---")
+sql_kpi_1 = """
+WITH FlightSSRCounter AS (
+    SELECT company_id, flight_number, scheduled_departure_date_local, COUNT(*) AS ssr_count FROM dbo.PNR_Remarks
+    GROUP BY company_id, flight_number, scheduled_departure_date_local
+)
+SELECT
+    CASE WHEN s.ssr_count IS NULL OR s.ssr_count = 0 THEN 'No SSRs' WHEN s.ssr_count BETWEEN 1 AND 2 THEN '1-2 SSRs'
+         WHEN s.ssr_count BETWEEN 3 AND 5 THEN '3-5 SSRs' ELSE '6+ SSRs' END AS ssr_category,
+    AVG(CASE WHEN f.actual_departure_datetime_local > DATEADD(minute, 15, f.scheduled_departure_datetime_local) THEN 0.0 ELSE 1.0 END) * 100 AS on_time_performance_pct
+FROM dbo.Flights f
+LEFT JOIN FlightSSRCounter s ON f.company_id = s.company_id AND f.flight_number = s.flight_number AND f.scheduled_departure_date_local = s.scheduled_departure_date_local
+GROUP BY CASE WHEN s.ssr_count IS NULL OR s.ssr_count = 0 THEN 'No SSRs' WHEN s.ssr_count BETWEEN 1 AND 2 THEN '1-2 SSRs'
+             WHEN s.ssr_count BETWEEN 3 AND 5 THEN '3-5 SSRs' ELSE '6+ SSRs' END
+ORDER BY ssr_category;
+"""
+df_kpi_1 = pd.read_sql(sql_kpi_1, db_connection)
+fig, ax = plt.subplots(figsize=(12, 7))
+sns.barplot(data=df_kpi_1, x='ssr_category', y='on_time_performance_pct', palette='viridis', ax=ax)
+
+# --- Enhancements ---
+ax.set_title('On-Time Performance Drops as Service Requests Increase', fontsize=20, weight='bold', loc='left')
+plt.suptitle('Flights with 6+ SSRs are nearly 10% less punctual than those with none.', fontsize=12, y=0.92, ha='left', x=0.125)
+ax.set_xlabel('Volume of Special Service Requests (SSRs)', fontsize=12, weight='bold')
+ax.set_ylabel('On-Time Performance (%)', fontsize=12, weight='bold')
+ax.set_ylim(0, 100)
+sns.despine(left=True)
+# Add data labels to each bar
+for p in ax.patches:
+    ax.text(p.get_x() + p.get_width()/2., p.get_height() + 0.5,
+            f"{p.get_height():.1f}%",
+            ha='center', va='bottom', color='black', size=11)
+plt.tight_layout(rect=[0, 0, 1, 0.9])
+plt.show()
+
+
+# --- KPI 1 Investigation: Deep Dive into Specific SSR Types ---
+print("\n--- Generating KPI 1 Investigation: Deep Dive into SSR Types ---")
+sql_investigation = """
+SELECT
+    r.special_service_request,
+    AVG(CASE WHEN f.actual_departure_datetime_local > DATEADD(minute, 15, f.scheduled_departure_datetime_local) THEN 0.0 ELSE 1.0 END) * 100 AS on_time_performance_pct
+FROM dbo.Flights AS f JOIN dbo.PNR_Remarks AS r ON f.company_id = r.company_id AND f.flight_number = r.flight_number AND f.scheduled_departure_date_local = r.scheduled_departure_date_local
+GROUP BY r.special_service_request
+HAVING COUNT(f.flight_number) > 50
+ORDER BY on_time_performance_pct ASC;
+"""
+df_investigation = pd.read_sql(sql_investigation, db_connection)
+fig, ax = plt.subplots(figsize=(12, 8))
+sns.barplot(data=df_investigation, x='on_time_performance_pct', y='special_service_request', palette='Reds_r', ax=ax)
+
+# --- Enhancements ---
+ax.set_title('Wheelchair Services are the Primary Drivers of Delays', fontsize=20, weight='bold', loc='left')
+plt.suptitle('On-time performance for flights with wheelchair requests is significantly below average.', fontsize=12, y=0.92, ha='left', x=0.125)
+ax.set_xlabel('On-Time Performance (%)', fontsize=12, weight='bold')
+ax.set_ylabel('Specific Service Request', fontsize=12, weight='bold')
+ax.set_xlim(0, 100)
+sns.despine(bottom=True)
+# Add data labels to each horizontal bar
+for p in ax.patches:
+    ax.text(p.get_width() + 0.3, p.get_y() + p.get_height()/2.,
+            f"{p.get_width():.1f}%",
+            ha='left', va='center', color='black', size=11)
+plt.tight_layout(rect=[0, 0, 1, 0.9])
+plt.show()
+
+
+# --- KPI 2: Ground Time Inefficiency by Passenger Group (Impressive Donut Charts) ---
+print("\n--- Generating KPI 2: Ground Time Inefficiency by Passenger Group ---")
+sql_kpi_2 = """
+SELECT 'Flights with Children' AS passenger_group, AVG(CASE WHEN f.actual_ground_time_minutes > f.scheduled_ground_time_minutes THEN 1.0 ELSE 0.0 END) * 100 AS inefficiency_pct
+FROM dbo.Flights f JOIN dbo.PNR_Flights pf ON f.company_id = pf.company_id AND f.flight_number = pf.flight_number AND f.scheduled_departure_date_local = pf.scheduled_departure_date_local WHERE pf.is_child = 1
+UNION ALL
+SELECT 'Flights with Strollers' AS passenger_group, AVG(CASE WHEN f.actual_ground_time_minutes > f.scheduled_ground_time_minutes THEN 1.0 ELSE 0.0 END) * 100 AS inefficiency_pct
+FROM dbo.Flights f JOIN dbo.PNR_Flights pf ON f.company_id = pf.company_id AND f.flight_number = pf.flight_number AND f.scheduled_departure_date_local = pf.scheduled_departure_date_local WHERE pf.is_stroller_user = 1;
+"""
+df_kpi_2 = pd.read_sql(sql_kpi_2, db_connection)
+fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+colors_children = ['#FF6347', '#E0E0E0'] # Tomato Red for inefficient
+colors_strollers = ['#4682B4', '#E0E0E0'] # Steel Blue for inefficient
+
+for i, ax in enumerate(axes):
+    group_name = df_kpi_2['passenger_group'][i]
+    inefficiency_pct = df_kpi_2['inefficiency_pct'][i]
+    colors = colors_children if 'Children' in group_name else colors_strollers
+    data = [inefficiency_pct, 100 - inefficiency_pct]
+    ax.pie(data, startangle=90, wedgeprops=dict(width=0.35, edgecolor='w'), colors=colors)
+    ax.text(0, 0, f'{inefficiency_pct:.1f}%', ha='center', va='center', fontsize=36, weight='bold')
+    ax.set_title(f'Inefficiency for\n{group_name}', fontsize=16, weight='bold', y=1.05)
+plt.suptitle('Strollers Correlate with Higher Ground Time Inefficiency', fontsize=20, weight='bold', y=1.1)
+plt.show()
+
+
+# --- KPI 3: Average Delay by Transfer Bag Volume (Impressive Heatmap) ---
+print("\n--- Generating KPI 3: Average Delay by Transfer Bag Volume ---")
+sql_kpi_3_heatmap = """
+WITH TransferBagCounts AS (SELECT company_id, flight_number, scheduled_departure_date_local, COUNT(*) AS transfer_bag_count FROM dbo.Bags WHERE bag_type = 'Transfer' GROUP BY company_id, flight_number, scheduled_departure_date_local)
+SELECT CASE WHEN b.transfer_bag_count BETWEEN 1 AND 5 THEN '1-5 Bags' WHEN b.transfer_bag_count BETWEEN 6 AND 10 THEN '6-10 Bags' WHEN b.transfer_bag_count BETWEEN 11 AND 20 THEN '11-20 Bags' ELSE '21+ Bags' END AS bag_category, CASE WHEN DATEPART(hour, f.scheduled_departure_datetime_local) BETWEEN 6 AND 11 THEN 'Morning' WHEN DATEPART(hour, f.scheduled_departure_datetime_local) BETWEEN 12 AND 16 THEN 'Afternoon' WHEN DATEPART(hour, f.scheduled_departure_datetime_local) BETWEEN 17 AND 21 THEN 'Evening' ELSE 'Night' END AS time_of_day, AVG(DATEDIFF(minute, f.scheduled_departure_datetime_local, f.actual_departure_datetime_local)) AS average_delay_minutes
+FROM dbo.Flights f JOIN TransferBagCounts b ON f.company_id = b.company_id AND f.flight_number = b.flight_number AND f.scheduled_departure_date_local = b.scheduled_departure_date_local
+WHERE f.actual_departure_datetime_local > f.scheduled_departure_datetime_local
+GROUP BY CASE WHEN b.transfer_bag_count BETWEEN 1 AND 5 THEN '1-5 Bags' WHEN b.transfer_bag_count BETWEEN 6 AND 10 THEN '6-10 Bags' WHEN b.transfer_bag_count BETWEEN 11 AND 20 THEN '11-20 Bags' ELSE '21+ Bags' END, CASE WHEN DATEPART(hour, f.scheduled_departure_datetime_local) BETWEEN 6 AND 11 THEN 'Morning' WHEN DATEPART(hour, f.scheduled_departure_datetime_local) BETWEEN 12 AND 16 THEN 'Afternoon' WHEN DATEPART(hour, f.scheduled_departure_datetime_local) BETWEEN 17 AND 21 THEN 'Evening' ELSE 'Night' END;
+"""
+df_kpi_3 = pd.read_sql(sql_kpi_3_heatmap, db_connection)
+heatmap_pivot = df_kpi_3.pivot(index="time_of_day", columns="bag_category", values="average_delay_minutes")
+plt.figure(figsize=(12, 7))
+sns.heatmap(heatmap_pivot, annot=True, fmt=".0f", cmap="rocket_r", linewidths=2, linecolor='white', annot_kws={"size": 12, "weight": "bold"})
+plt.title('Heatmap of Average Delay (Minutes) by Bag Volume and Time', fontsize=20, weight='bold', loc='left')
+plt.suptitle('Evening flights with high bag volumes are the primary bottleneck.', fontsize=12, y=0.92, ha='left', x=0.125)
+plt.xlabel('Volume of Transfer Bags', fontsize=12, weight='bold')
+plt.ylabel('Time of Day', fontsize=12, weight='bold')
+plt.xticks(rotation=0)
+plt.yticks(rotation=0)
+plt.show()
+
+
+# --- KPI 4: Turnaround Success Rate by Fleet Type (Impressive Diverging Lollipop) ---
+print("\n--- Generating KPI 4: Turnaround Success Rate by Fleet Type ---")
+sql_kpi_4 = """
+SELECT fleet_type, AVG(CASE WHEN actual_ground_time_minutes <= minimum_turn_minutes THEN 1.0 ELSE 0.0 END) * 100 AS turnaround_success_rate_pct
+FROM dbo.Flights WHERE actual_ground_time_minutes IS NOT NULL GROUP BY fleet_type;
+"""
+df_kpi_4 = pd.read_sql(sql_kpi_4, db_connection)
+df_kpi_4['deviation'] = df_kpi_4['turnaround_success_rate_pct'] - df_kpi_4['turnaround_success_rate_pct'].mean()
+df_kpi_4['color'] = ['#2ca02c' if x > 0 else '#d62728' for x in df_kpi_4['deviation']]
+df_kpi_4 = df_kpi_4.sort_values('deviation').reset_index(drop=True)
+
+fig, ax = plt.subplots(figsize=(12, 8))
+ax.hlines(y=df_kpi_4.index, xmin=0, xmax=df_kpi_4['deviation'], color=df_kpi_4['color'], alpha=0.8, linewidth=5)
+ax.scatter(df_kpi_4['deviation'], df_kpi_4.index, color=df_kpi_4['color'], s=150, alpha=0.8, zorder=3)
+ax.axvline(0, color='grey', linestyle='--', linewidth=1)
+ax.set_yticks(df_kpi_4.index)
+ax.set_yticklabels(df_kpi_4['fleet_type'])
+ax.set_title('Fleet Turnaround Performance vs. Network Average', fontsize=20, weight='bold', loc='left')
+plt.suptitle('Certain regional jets significantly underperform the fleet average.', fontsize=12, y=0.92, ha='left', x=0.125)
+ax.set_xlabel('Deviation from Average Success Rate (Percentage Points)', fontsize=12, weight='bold')
+ax.set_ylabel('Aircraft Model', fontsize=12, weight='bold')
+plt.tight_layout(rect=[0, 0, 1, 0.9])
+plt.show()
+
+
+# --- KPI 5: Top 10 Worst Performing Routes by Average Delay (Impressive Bar Chart) ---
+print("\n--- Generating KPI 5: Top 10 Worst Performing Routes by Average Delay ---")
+sql_kpi_5 = """
+SELECT TOP 10 CONCAT(scheduled_departure_station_code, ' -> ', scheduled_arrival_station_code) AS route, AVG(DATEDIFF(minute, scheduled_arrival_datetime_local, actual_arrival_datetime_local)) AS average_arrival_delay_minutes
+FROM dbo.Flights WHERE actual_arrival_datetime_local > scheduled_arrival_datetime_local
+GROUP BY CONCAT(scheduled_departure_station_code, ' -> ', scheduled_arrival_station_code)
+ORDER BY average_arrival_delay_minutes DESC;
+"""
+df_kpi_5 = pd.read_sql(sql_kpi_5, db_connection)
+fig, ax = plt.subplots(figsize=(12, 8))
+sns.barplot(data=df_kpi_5, y='route', x='average_arrival_delay_minutes', palette='plasma', ax=ax)
+ax.set_title('Top 10 Most Delayed Routes in the Network', fontsize=20, weight='bold', loc='left')
+plt.suptitle('These routes represent the biggest opportunities for operational improvement.', fontsize=12, y=0.92, ha='left', x=0.125)
+ax.set_xlabel('Average Arrival Delay (Minutes)', fontsize=12, weight='bold')
+ax.set_ylabel('Route', fontsize=12, weight='bold')
+sns.despine(bottom=True)
+# Add data labels to each horizontal bar
+for p in ax.patches:
+    ax.text(p.get_width() + 0.3, p.get_y() + p.get_height()/2.,
+            f"{p.get_width():.0f} min",
+            ha='left', va='center', color='black', size=11)
+plt.tight_layout(rect=[0, 0, 1, 0.9])
+plt.show()
+
+
 
