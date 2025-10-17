@@ -67,3 +67,157 @@ GROUP BY
     r.special_service_request
 ORDER BY
     on_time_performance_pct ASC;
+
+--KPI 2 
+-- Ground Time Inefficiency by Passenger Group
+
+-- Check for flights with children, using 1 instead of 'Y'
+SELECT
+    'Flights with Children' AS passenger_group,
+    AVG(CASE WHEN f.actual_ground_time_minutes > f.scheduled_ground_time_minutes THEN 1.0 ELSE 0.0 END) * 100 AS inefficiency_pct
+FROM dbo.Flights f
+JOIN dbo.PNR_Flights pf ON f.company_id = pf.company_id AND f.flight_number = pf.flight_number AND f.scheduled_departure_date_local = pf.scheduled_departure_date_local
+WHERE pf.is_child = 1 
+
+UNION ALL
+
+-- Check for flights with strollers, using 1 instead of 'Y'
+SELECT
+    'Flights with Strollers' AS passenger_group,
+    AVG(CASE WHEN f.actual_ground_time_minutes > f.scheduled_ground_time_minutes THEN 1.0 ELSE 0.0 END) * 100 AS inefficiency_pct
+FROM dbo.Flights f
+JOIN dbo.PNR_Flights pf ON f.company_id = pf.company_id AND f.flight_number = pf.flight_number AND f.scheduled_departure_date_local = pf.scheduled_departure_date_local
+WHERE pf.is_stroller_user = 1; 
+
+--subpart of KPI 2 
+-- Your current KPI treats a flight with one child the same as a flight with twenty. This query investigates if there's a "tipping point" where the number of children on board starts to significantly impact ground time.
+-- Why it's valuable: This helps the airline understand if they need to worry about all family flights, or only those with a high density of children.
+
+-- Use a CTE to count children per flight
+WITH ChildCountPerFlight AS (
+    SELECT
+        company_id,
+        flight_number,
+        scheduled_departure_date_local,
+        SUM(CASE WHEN is_child = 1 THEN 1 ELSE 0 END) AS number_of_children
+    FROM
+        dbo.PNR_Flights
+    GROUP BY
+        company_id, flight_number, scheduled_departure_date_local
+)
+-- Main query to calculate inefficiency based on the volume of children
+SELECT
+    -- Create categories for the number of children
+    CASE
+        WHEN c.number_of_children BETWEEN 1 AND 5 THEN '1-5 Children'
+        WHEN c.number_of_children BETWEEN 6 AND 10 THEN '6-10 Children'
+        WHEN c.number_of_children > 10 THEN '11+ Children'
+    END AS child_volume_category,
+    AVG(CASE WHEN f.actual_ground_time_minutes > f.scheduled_ground_time_minutes THEN 1.0 ELSE 0.0 END) * 100 AS inefficiency_pct
+FROM
+    dbo.Flights f
+JOIN
+    ChildCountPerFlight c ON f.company_id = c.company_id
+                         AND f.flight_number = c.flight_number
+                         AND f.scheduled_departure_date_local = c.scheduled_departure_date_local
+WHERE
+    c.number_of_children > 0 -- Only include flights that actually have children
+GROUP BY
+    CASE
+        WHEN c.number_of_children BETWEEN 1 AND 5 THEN '1-5 Children'
+        WHEN c.number_of_children BETWEEN 6 AND 10 THEN '6-10 Children'
+        WHEN c.number_of_children > 10 THEN '11+ Children'
+    END
+ORDER BY
+    child_volume_category;
+
+-- KPI 3 
+-- Average Delay by Transfer Bag Volume
+
+-- Step 1: Use a CTE to efficiently count transfer bags for each flight.
+-- This is much faster than the original query.
+WITH TransferBagCounts AS (
+    SELECT
+        company_id,
+        flight_number,
+        scheduled_departure_date_local,
+        COUNT(*) AS transfer_bag_count
+    FROM
+        dbo.Bags
+    WHERE
+        bag_type = 'Transfer'
+    GROUP BY
+        company_id, flight_number, scheduled_departure_date_local
+)
+-- Step 2: Join the bag counts with flights and calculate the average delay.
+SELECT
+    -- Create human-readable categories for the number of bags.
+    CASE
+        WHEN b.transfer_bag_count BETWEEN 1 AND 5 THEN '1-5 Bags'
+        WHEN b.transfer_bag_count BETWEEN 6 AND 10 THEN '6-10 Bags'
+        WHEN b.transfer_bag_count BETWEEN 11 AND 20 THEN '11-20 Bags'
+        ELSE '21+ Bags'
+    END AS bag_category,
+    -- Calculate the average delay for each category.
+    AVG(DATEDIFF(minute, f.scheduled_departure_datetime_local, f.actual_departure_datetime_local)) AS average_delay_minutes
+FROM
+    dbo.Flights f
+-- Join flights with our pre-calculated bag counts. An INNER JOIN automatically filters for flights with transfer bags.
+JOIN
+    TransferBagCounts b ON f.company_id = b.company_id
+                       AND f.flight_number = b.flight_number
+                       AND f.scheduled_departure_date_local = b.scheduled_departure_date_local
+-- Only look at flights that were actually delayed.
+WHERE
+    f.actual_departure_datetime_local > f.scheduled_departure_datetime_local
+-- Group the results by the categories we created.
+GROUP BY
+    CASE
+        WHEN b.transfer_bag_count BETWEEN 1 AND 5 THEN '1-5 Bags'
+        WHEN b.transfer_bag_count BETWEEN 6 AND 10 THEN '6-10 Bags'
+        WHEN b.transfer_bag_count BETWEEN 11 AND 20 THEN '11-20 Bags'
+        ELSE '21+ Bags'
+    END
+-- Order the results for a clean presentation.
+ORDER BY
+    bag_category;
+
+-- KPI 4 
+-- Turnaround Success Rate by Fleet Type. 
+
+-- Select the aircraft type and calculate its success rate
+SELECT
+    fleet_type,
+    -- Calculate the percentage of flights that met their minimum turn time
+    AVG(CASE WHEN actual_ground_time_minutes <= minimum_turn_minutes THEN 1.0 ELSE 0.0 END) * 100 AS turnaround_success_rate_pct
+FROM
+    dbo.Flights
+WHERE
+    actual_ground_time_minutes IS NOT NULL -- Ignore flights with missing data
+GROUP BY
+    fleet_type
+ORDER BY
+    turnaround_success_rate_pct DESC; -- Show the best performers first
+
+-- KPI 5
+-- Top 10 Worst Performing Routes by Average DelaY
+
+-- Select the top 10 worst performers
+SELECT TOP 10
+    -- Combine origin and destination to create a 'route' name (e.g., 'JFK -> LAX')
+    CONCAT(scheduled_departure_station_code, ' -> ', scheduled_arrival_station_code) AS route,
+    -- Calculate the average arrival delay in minutes for each route
+    AVG(DATEDIFF(minute, scheduled_arrival_datetime_local, actual_arrival_datetime_local)) AS average_arrival_delay_minutes
+FROM
+    dbo.Flights
+-- Only include flights that actually arrived late to measure the severity of the delay
+WHERE
+    actual_arrival_datetime_local > scheduled_arrival_datetime_local
+-- Group all the flights for the same route together to calculate the average
+GROUP BY
+    CONCAT(scheduled_departure_station_code, ' -> ', scheduled_arrival_station_code)
+-- Order the results from the highest delay to the lowest to find the worst
+ORDER BY
+    average_arrival_delay_minutes DESC;
+
+
